@@ -1,0 +1,4 @@
+127.0.0.1 localhost
+{% for server in groups['project_a02']%}
+{{hostvars[server]['ansible_facts']['default_ipv4']['address']}} {{hostvars[server]['ansible_facts']['nodename']}}
+{% endfor %}

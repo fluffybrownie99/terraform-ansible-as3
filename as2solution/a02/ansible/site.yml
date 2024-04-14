@@ -1,0 +1,203 @@
+---
+
+- name: initial setup
+  hosts: all
+  tasks:
+
+    - name: set hostname to inventory name
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+      become: true
+
+    - name: setup hosts file with inventory names
+      ansible.builtin.template:
+        src: templates/hosts.j2
+        dest: /etc/hosts
+        group: root
+        owner: root
+        mode: u=rw,g=r,o=r
+      become: true
+
+  tags:
+    - initial
+    - configure
+
+- name:  network debug setup
+  hosts: all
+  tasks:
+
+    - name: install network debugging tools
+      ansible.builtin.package:
+        update_cache: true
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - bind9-dnsutils
+        - tcpdump
+        - nmap
+        - netcat-openbsd
+      become: true
+
+  tags:
+    - debug_tools
+    - configure
+
+
+- name: install bun
+  hosts: role_web
+  tasks:
+    - name: create application user
+      # uses https://manpages.ubuntu.com/manpages/xenial/en/man8/useradd.8.html
+      ansible.builtin.user: 
+        name: bun
+        state: present
+        home: /home/bun
+        system: yes
+      become: true
+    - name: install bun requirements
+      # see https://docs.ansible.com/ansible-core/2.15/playbook_guide/playbooks_privilege_escalation.html#resolving-temporary-file-error-messages
+      ansible.builtin.package:
+        name: "{{ item }}" 
+        state: latest
+      with_items:
+        - unzip
+        - acl
+      become: true
+    - name: install bun
+      ansible.builtin.shell: |
+        curl -fsSL https://bun.sh/install | bash
+      args:
+        executable: /bin/bash
+        creates: /home/bun/.bun/bin/bun
+      become: true
+      become_user: bun
+    - name: add bunx link
+      # bunx isn't created by installer above
+      ansible.builtin.file:
+        src:  /home/bun/.bun/bin/bun
+        dest: /home/bun/.bun/bin/bunx
+        state: link
+        owner: bun
+        group: bun
+        mode: u=rwx,g=rwx,o=rwx
+      become: true
+  tags:
+    - web
+    - configure
+    - bun
+
+
+- name: install caddy
+  hosts: role_web
+  tasks:
+    - name: install caddy requirements
+      ansible.builtin.package:
+        name: "{{ item }}" 
+        state: latest
+      with_items:
+        - debian-keyring
+        - debian-archive-keyring 
+        - apt-transport-https 
+        - curl
+      become: true
+    - name: install caddy keyring and rep
+      ansible.builtin.shell: |
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+      args:
+        creates: /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      become: true
+    - name: install caddy package
+      ansible.builtin.package:
+        name: "{{ item }}" 
+        state: latest
+        update_cache: true
+      with_items:
+        - caddy
+      become: true
+  tags:
+    - web
+    - configure
+    - caddy
+
+- name: install 4640 A02 application
+  hosts: role_web
+  tasks:
+    - name: install required packages for app
+      ansible.builtin.package:
+        name: "{{ item }}" 
+        state: latest
+      with_items:
+        - git
+      become: true
+    - name: get 4640 A02 application source
+      ansible.builtin.git:
+        repo: 'https://gitlab.com/cit_4640/4640-assignment-app-files.git'
+        dest: /home/bun/4640-assignment-app-files/
+        update: yes
+        force: yes
+      become: true
+      become_user: bun 
+    - name: create bun-htmx-4640 app directory
+      ansible.builtin.copy:
+        src: /home/bun/4640-assignment-app-files/bun-htmx-4640
+        dest: /home/bun/
+        remote_src: true
+        owner: bun
+        group: bun
+        mode: u=rwx,g=rwx,o=rwx
+        force: true
+      become: true
+      become_user: bun
+    - name: install app requirements
+      ansible.builtin.command: 
+        /home/bun/.bun/bin/bun install
+      args:
+        chdir: /home/bun/bun-htmx-4640
+        creates: /home/bun/bun-htmx-4640/node_modules
+      become: true
+      become_user: bun
+    - name: configure caddy
+      ansible.builtin.copy:
+        src: /home/bun/4640-assignment-app-files/Caddyfile
+        dest: /etc/caddy/Caddyfile
+        remote_src: true
+        owner: caddy
+        group: caddy
+        mode: u=rw,g=rw,o=r
+        force: true
+      become: true
+      notify: restart caddy
+
+    - name: configure app service
+      ansible.builtin.copy:
+        remote_src: true
+        src: /home/bun/4640-assignment-app-files/bun-4640-project.service
+        dest: /etc/systemd/system/bun-4640-project.service
+        owner: root
+        group: root
+        mode: u=rw,g=rw,o=r
+        force: true
+      become: true
+      notify: restart bun-4640-project
+   
+  tags:
+    - web
+    - configure
+    - app
+
+  handlers:
+    - name: restart bun-4640-project
+      ansible.builtin.service:
+        name: bun-4640-project
+        state: restarted
+        enabled: true
+        daemon_reload: true
+      become: true
+    - name: restart caddy
+      ansible.builtin.service:
+        name: caddy
+        state: restarted
+        enabled: true
+        daemon_reload: true
+      become: true
